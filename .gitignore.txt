@@ -1,0 +1,20 @@
+# Archivos de secrets locales de Streamlit
+.streamlit/secrets.toml
+
+# Carpetas de entornos virtuales de Python
+venv/
+*.venv/
+env/
+ENV/
+.env
+
+# Archivos de caché de Python y compilados
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos de configuración de IDEs comunes
+.vscode/
+.idea/
+*.DS_Store
