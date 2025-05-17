@@ -1,25 +1,25 @@
-import streamlit as st # Debe estar al principio para st.secrets
+import streamlit as st
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, date # Se usa 'date' para comparar fechas del caché
 import pandas as pd
-import time
+import time # Aunque no se usa activamente para retrasos aquí, es bueno tenerlo si se necesita
 
 # --- CONFIGURACIÓN ---
+# El API_TICKET ya no es usado directamente por esta app para las búsquedas principales,
+# pero se mantiene por si el bloque try-except original lo necesita como fallback o para otras funciones futuras.
 try:
     API_TICKET = st.secrets["API_TICKET_MERCADOPUBLICO"]
 except KeyError:
     API_TICKET = "TU_TICKET_POR_DEFECTO_O_DE_PRUEBA_LOCAL" 
     if API_TICKET == "TU_TICKET_POR_DEFECTO_O_DE_PRUEBA_LOCAL":
-        st.error("API_TICKET no configurado en los secrets. La aplicación podría no funcionar correctamente. "
-                 "Para despliegue, configura el secret 'API_TICKET_MERCADOPUBLICO'. "
-                 "Para pruebas locales, crea '.streamlit/secrets.toml'.")
-        # Considera st.stop() si el ticket es absolutamente esencial y no se puede proceder sin él.
+        # Ya no es un error crítico si no lo encuentra, porque leemos del Gist
+        st.sidebar.warning("API_TICKET no configurado en los secrets. Se leerá del caché Gist.")
 
-CODIGO_CENABAST = "6957"
-BASE_URL_LICITACIONES = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
+# --- URL DEL GIST DE CACHÉ ---
+GIST_CACHE_URL = "https://gist.githubusercontent.com/Neshamalic/7683372d7c8374cbd8bc67d81eec5fe9/raw/7705bf1ca22a60fb3e8683f7394cf1c756cde759/oportunidades_cache.json"
 
-# --- TU CATÁLOGO DE PRODUCTOS ---
+# --- TU CATÁLOGO DE PRODUCTOS (se mantiene por si la app hace algún filtrado local) ---
 CATALOGO_PRODUCTOS_RAW = """
 AMLODIPINO	amlodipino
 AMOXICILINA	amoxi
@@ -65,16 +65,17 @@ TRANEXAMICO	TRANEXAMICO,tranexamico
 TRAZODONA	TRAZODONA,trazodona
 """
 
+# No necesitamos parsear el catálogo aquí si el filtrado ya se hizo en updater.py
+# Pero lo dejamos por si en el futuro se quiere añadir filtrado en la UI
 def parsear_catalogo(raw_data):
+    # ... (código de parsear_catalogo como lo tenías)
     catalogo_procesado = {}
     for line in raw_data.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
+        line = line.strip();
+        if not line: continue
         parts = line.split('\t')
         producto_principal_original_casing = parts[0].strip()
-        if not producto_principal_original_casing:
-            continue
+        if not producto_principal_original_casing: continue
         palabras_clave_para_este_producto = {producto_principal_original_casing.lower()}
         if len(parts) > 1 and parts[1].strip():
             secundarias_raw = parts[1].strip()
@@ -83,314 +84,131 @@ def parsear_catalogo(raw_data):
         catalogo_procesado[producto_principal_original_casing] = palabras_clave_para_este_producto
     return catalogo_procesado
 
-MI_CATALOGO_ESTRUCTURADO = parsear_catalogo(CATALOGO_PRODUCTOS_RAW)
+MI_CATALOGO_ESTRUCTURADO = parsear_catalogo(CATALOGO_PRODUCTOS_RAW) # Se mantiene por si acaso
 
-LICITACIONES_DEBUG_IMPRESAS = 0
-MAX_LICITACIONES_DEBUG = 3
 
 def log_message(message, level="INFO"):
     timestamp = datetime.now().strftime('%H:%M:%S')
-    if 'log_messages' not in st.session_state:
-        st.session_state.log_messages = []
-    st.session_state.log_messages.append(f"{timestamp} - {level.upper()}: {message}")
-    print(f"{timestamp} - {level.upper()}: {message}")
+    if 'log_messages_streamlit' not in st.session_state: # Usar un nombre diferente para el log de esta app
+        st.session_state.log_messages_streamlit = []
+    st.session_state.log_messages_streamlit.append(f"{timestamp} - {level.upper()}: {message}")
+    print(f"STREAMLIT_APP_LOG - {timestamp} - {level.upper()}: {message}") # Para logs del servidor de Streamlit Cloud
 
-def obtener_licitaciones_cenabast_activas():
-    params = {
-        "ticket": API_TICKET,
-        "CodigoOrganismo": CODIGO_CENABAST,
-        "estado": "activas"
-    }
+
+@st.cache_data(ttl=300) # Cachear los datos del Gist por 5 minutos (300 segundos) para reducir llamadas
+def cargar_datos_desde_gist():
+    log_message(f"Intentando cargar datos desde Gist: {GIST_CACHE_URL}", "INFO")
+    oportunidades = []
+    fecha_cache_obtenida = "No disponible"
     try:
-        response = requests.get(BASE_URL_LICITACIONES, params=params, timeout=45)
+        # Añadir un timestamp al final de la URL para intentar evitar el caché del navegador/CDN agresivo
+        cache_buster_url = f"{GIST_CACHE_URL}?v={int(time.time())}"
+        response = requests.get(cache_buster_url, timeout=20) # Timeout más corto, es solo leer un archivo
         response.raise_for_status()
-        data = response.json()
-        if data.get("Cantidad") is not None and data.get("Cantidad") > 0 and data.get("Listado"):
-            return data["Listado"]
+        datos_gist = response.json()
+        
+        fecha_cache_obtenida = datos_gist.get("fecha_cache", "Desconocida (sin fecha en Gist)")
+        oportunidades = datos_gist.get("oportunidades", [])
+        
+        if oportunidades:
+            log_message(f"Datos ({len(oportunidades)} oportunidades) cargados desde Gist. Fecha del caché Gist: {fecha_cache_obtenida}.", "INFO")
         else:
-            log_message(f"No se encontraron licitaciones activas o respuesta inesperada. Respuesta API: {data}", "ADVERTENCIA")
-            return []
+            log_message(f"Gist cargado pero no contiene oportunidades. Fecha del caché Gist: {fecha_cache_obtenida}.", "ADVERTENCIA")
+            
     except requests.exceptions.Timeout:
-        log_message("Timeout al obtener listado de licitaciones activas.", "ERROR")
-        return []
+        log_message("Timeout al cargar datos desde Gist.", "ERROR")
     except requests.exceptions.RequestException as e:
-        log_message(f"Al obtener listado de licitaciones: {e}", "ERROR")
-        if 'response' in locals() and response is not None:
-            log_message(f"Respuesta del servidor: {response.text}", "ERROR")
-    except json.JSONDecodeError as je:
-        log_message(f"Error al decodificar JSON del listado: {je}. Respuesta: {response.text if 'response' in locals() and response is not None else 'No response object'}", "ERROR")
-    return []
-
-def obtener_detalle_licitacion(codigo_licitacion):
-    global LICITACIONES_DEBUG_IMPRESAS
-    params = {
-        "ticket": API_TICKET,
-        "codigo": codigo_licitacion
-    }
-    intentos = 0
-    max_intentos = 2 
-    retraso_base_reintento = 5 # Segundos para el primer reintento por error 10500
-
-    while intentos < max_intentos:
-        try:
-            response = requests.get(BASE_URL_LICITACIONES, params=params, timeout=45)
-            response.raise_for_status()
-            detalle_completo_json = response.json()
-
-            if detalle_completo_json and detalle_completo_json.get("Cantidad", 0) > 0 and detalle_completo_json.get("Listado"):
-                detalle_lic_obj = detalle_completo_json["Listado"][0]
-                if LICITACIONES_DEBUG_IMPRESAS < MAX_LICITACIONES_DEBUG:
-                    # Descomentar para depuración intensiva si es necesario
-                    # log_message(f"JSON OBTENIDO para {codigo_licitacion}:\n{json.dumps(detalle_lic_obj, indent=2, ensure_ascii=False)}", "DEBUG")
-                    LICITACIONES_DEBUG_IMPRESAS += 1
-                return detalle_lic_obj
-            elif detalle_completo_json and detalle_completo_json.get("Codigo") == 10500:
-                retraso_actual = retraso_base_reintento * (2**intentos)
-                log_message(f"Codigo 10500 para {codigo_licitacion}. Intento {intentos + 1}/{max_intentos}. Reintentando en {retraso_actual}s...", "ADVERTENCIA")
-                time.sleep(retraso_actual)
-                intentos += 1
-                continue
-            else:
-                log_message(f"Respuesta inesperada para {codigo_licitacion}. Detalle: {detalle_completo_json}. Intento {intentos + 1}/{max_intentos}.", "ADVERTENCIA")
-                retraso_actual = retraso_base_reintento * (2**intentos)
-                time.sleep(retraso_actual)
-                intentos +=1
-                continue
-        except requests.exceptions.HTTPError as http_err:
-            error_msg = f"HTTP {http_err.response.status_code} para {codigo_licitacion}"
-            retraso_actual = retraso_base_reintento * (2**intentos)
-            try:
-                error_json = http_err.response.json()
-                error_msg += f" - Detalle API: {error_json}"
-                if error_json.get("Codigo") == 10500:
-                     log_message(f"Error 10500 (vía HTTPError) para {codigo_licitacion}. Intento {intentos + 1}/{max_intentos}. Reintentando en {retraso_actual}s...", "ADVERTENCIA")
-                else:
-                    log_message(error_msg + f". Intento {intentos + 1}/{max_intentos}. Reintentando en {retraso_actual}s...", "ERROR")
-            except json.JSONDecodeError:
-                log_message(error_msg + f" (Cuerpo no JSON: {http_err.response.text}). Intento {intentos + 1}/{max_intentos}. Reintentando en {retraso_actual}s...", "ERROR")
-            intentos += 1
-            if intentos < max_intentos:
-                time.sleep(retraso_actual)
-            continue
-        except requests.exceptions.Timeout:
-            retraso_actual = retraso_base_reintento * (2**intentos)
-            log_message(f"Timeout para {codigo_licitacion}. Intento {intentos + 1}/{max_intentos}. Reintentando en {retraso_actual}s...", "ERROR")
-            intentos +=1
-            if intentos < max_intentos:
-                time.sleep(retraso_actual)
-            continue
-        except requests.exceptions.RequestException as e:
-            retraso_actual = retraso_base_reintento * (2**intentos)
-            log_message(f"Error de red para {codigo_licitacion}: {e}. Intento {intentos + 1}/{max_intentos}. Reintentando en {retraso_actual}s...", "ERROR")
-            intentos +=1
-            if intentos < max_intentos:
-                time.sleep(retraso_actual)
-            continue
-        except json.JSONDecodeError as je:
-            log_message(f"Error al decodificar JSON para {codigo_licitacion} (respuesta OK): {je}. Respuesta: {response.text if 'response' in locals() and response is not None else 'No response object'}", "ERROR")
-            return None
+        log_message(f"Error de red al cargar datos desde Gist: {e}", "ERROR")
+    except json.JSONDecodeError as e:
+        log_message(f"Error al decodificar JSON desde Gist: {e}. Contenido recibido: {response.text[:500] if 'response' in locals() else 'N/A'}", "ERROR")
+    except Exception as e:
+        log_message(f"Error inesperado al cargar datos desde Gist: {e}", "ERROR")
     
-    log_message(f"Se superaron los {max_intentos} intentos para obtener detalle de {codigo_licitacion}.", "ERROR")
-    return None
-
-def producto_coincide_con_catalogo(nombre_item_licitacion, descripcion_item_licitacion, catalogo_estructurado):
-    texto_busqueda_licitacion = ( (nombre_item_licitacion.lower() if nombre_item_licitacion else "") + " " +
-                                  (descripcion_item_licitacion.lower() if descripcion_item_licitacion else "") ).strip()
-    if not texto_busqueda_licitacion:
-        return None
-    for producto_principal_catalogo, conjunto_palabras_clave in catalogo_estructurado.items():
-        for palabra_clave_individual in conjunto_palabras_clave:
-            if palabra_clave_individual in texto_busqueda_licitacion:
-                return producto_principal_catalogo
-    return None
+    return oportunidades, fecha_cache_obtenida
 
 # --- Streamlit UI ---
-# --- CAMBIO DE TÍTULO DE PÁGINA/PESTAÑA ---
 st.set_page_config(page_title="PINNACLE - Licitaciones", page_icon=":briefcase:", layout="wide")
+st.title("PINNACLE :briefcase: - Oportunidades en Licitaciones CENABAST")
+st.markdown("Resultados de licitaciones de CENABAST (actualizados diariamente por un proceso automático).")
 
-# --- CAMBIO DE TÍTULO PRINCIPAL DE LA APP ---
-st.title("PINNACLE :briefcase: - Oportunidades en Licitaciones CENABAST") # Cambiado emoji también
-st.markdown("Buscando licitaciones vigentes de CENABAST que coincidan con tu catálogo de productos.")
+# Inicializar session_state para los logs de esta app
+if 'log_messages_streamlit' not in st.session_state:
+    st.session_state.log_messages_streamlit = []
 
-if 'oportunidades_encontradas' not in st.session_state:
-    st.session_state.oportunidades_encontradas = []
-if 'log_messages' not in st.session_state:
-    st.session_state.log_messages = []
-if 'busqueda_realizada' not in st.session_state:
-    st.session_state.busqueda_realizada = False
+# Botón para refrescar la vista (vuelve a cargar del Gist)
+if st.button("Refrescar Vista (desde caché diario)", type="primary"):
+    # Limpiar el caché de la función para forzar una nueva descarga del Gist
+    cargar_datos_desde_gist.clear() 
+    st.rerun()
 
-st.sidebar.header("Tu Catálogo de Productos Procesado")
-if MI_CATALOGO_ESTRUCTURADO:
-    for prod_principal, kws in MI_CATALOGO_ESTRUCTURADO.items():
-        st.sidebar.markdown(f"**{prod_principal}**: {', '.join(kws)}")
-else:
-    st.sidebar.warning("El catálogo de productos está vacío o no se pudo procesar.")
+# Cargar los datos
+oportunidades_a_mostrar, fecha_del_cache = cargar_datos_desde_gist()
 
-# --- CAMBIO DE RETRASO ---
-RETRASO_ENTRE_LLAMADAS_DETALLE = 1.0  # Cambiado a 1 segundo
-# ¡PRECAUCIÓN! Un retraso menor puede causar errores de "peticiones simultáneas".
-# Si ocurren, aumenta este valor (ej. 1.5, 2.0, 2.5).
+st.caption(f"Datos mostrados corresponden a la actualización automática del: {fecha_del_cache}")
 
-def run_neshama_logic():
-    global LICITACIONES_DEBUG_IMPRESAS
-    LICITACIONES_DEBUG_IMPRESAS = 0 
-
-    st.session_state.log_messages = [] 
-    st.session_state.oportunidades_encontradas = []
-    st.session_state.busqueda_realizada = True
-
-    log_message("PINNACLE: Iniciando búsqueda de licitaciones activas de CENABAST...") # Nombre cambiado
-    licitaciones_activas_cenabast = obtener_licitaciones_cenabast_activas()
-
-    if licitaciones_activas_cenabast:
-        log_message(f"Se encontraron {len(licitaciones_activas_cenabast)} licitaciones activas (resumen). Obteniendo detalles...")
-        
-        progress_text_detalle = "Obteniendo detalles de licitaciones. Por favor espere..."
-        progress_bar_placeholder = st.empty()
-        total_licitaciones_activas = len(licitaciones_activas_cenabast)
-
-        for i, licitacion_resumen in enumerate(licitaciones_activas_cenabast):
-            codigo_externo = licitacion_resumen.get("CodigoExterno")
-            # nombre_licitacion_resumen = licitacion_resumen.get('Nombre', 'Sin Nombre Asignado') # No usado directamente
-            
-            progress_fraction = (i + 1) / total_licitaciones_activas
-            progress_bar_placeholder.progress(progress_fraction, text=f"{progress_text_detalle} ({i+1}/{total_licitaciones_activas}) - {codigo_externo}")
-
-            if not codigo_externo:
-                log_message(f"Licitación sin CodigoExterno en el resumen: {licitacion_resumen}", "ADVERTENCIA")
-                continue
-            
-            time.sleep(RETRASO_ENTRE_LLAMADAS_DETALLE)
-            detalle_lic = obtener_detalle_licitacion(codigo_externo)
-
-            if detalle_lic:
-                fecha_cierre_str = None
-                fecha_cierre_str_nivel_superior = detalle_lic.get("FechaCierre")
-                if fecha_cierre_str_nivel_superior and isinstance(fecha_cierre_str_nivel_superior, str) and fecha_cierre_str_nivel_superior.strip():
-                    fecha_cierre_str = fecha_cierre_str_nivel_superior
-                else:
-                    fechas_obj = detalle_lic.get("Fechas")
-                    if fechas_obj and isinstance(fechas_obj, dict):
-                        fecha_cierre_str_anidada = fechas_obj.get("FechaCierre")
-                        if fecha_cierre_str_anidada and isinstance(fecha_cierre_str_anidada, str) and fecha_cierre_str_anidada.strip():
-                            fecha_cierre_str = fecha_cierre_str_anidada
-
-                fecha_cierre_dt = None
-                dias_para_cierre = "N/A"
-                fecha_cierre_display = "N/A"
-
-                if fecha_cierre_str:
-                    try:
-                        ts = fecha_cierre_str.replace('Z', '')
-                        if '+' in ts: ts = ts.split('+')[0]
-                        
-                        date_format_to_try = '%Y-%m-%dT%H:%M:%S'
-                        ts_corregido = ts
-                        if '.' in ts:
-                            partes_ts = ts.split('.')
-                            ts_parte_entera = partes_ts[0]
-                            ts_microsegundos = partes_ts[1][:6]
-                            ts_corregido = f"{ts_parte_entera}.{ts_microsegundos}"
-                            date_format_to_try = '%Y-%m-%dT%H:%M:%S.%f'
-
-                        fecha_cierre_dt = datetime.strptime(ts_corregido, date_format_to_try)
-                        fecha_cierre_display = fecha_cierre_dt.strftime('%d/%m/%Y %H:%M')
-                        hoy = datetime.now()
-                        if fecha_cierre_dt > hoy:
-                            delta = fecha_cierre_dt - hoy
-                            dias_para_cierre = delta.days
-                        else:
-                            dias_para_cierre = 0 
-                    except ValueError as ve:
-                        log_message(f"Error parseando FechaCierre '{fecha_cierre_str}' (corregido a '{ts_corregido if 'ts_corregido' in locals() else 'N/A'}') para {codigo_externo}: {ve}. Se usará N/A.", "ADVERTENCIA")
-                else:
-                    log_message(f"No se encontró un valor válido para FechaCierre para {codigo_externo}.", "ADVERTENCIA")
-                
-                items_licitacion = detalle_lic.get("Items", {}).get("Listado", [])
-                if not items_licitacion:
-                     log_message(f"Licitación {codigo_externo} no tiene items detallados.", "ADVERTENCIA")
-
-                for item in items_licitacion:
-                    nombre_producto_licitacion = item.get("NombreProducto", "No especificado")
-                    descripcion_item_licitacion = item.get("Descripcion", "No especificado")
-                    cantidad_licitacion = item.get("Cantidad", "No especificado")
-
-                    producto_de_mi_catalogo_coincidente = producto_coincide_con_catalogo(
-                        nombre_producto_licitacion,
-                        descripcion_item_licitacion,
-                        MI_CATALOGO_ESTRUCTURADO
-                    )
-
-                    if producto_de_mi_catalogo_coincidente:
-                        oportunidad = {
-                            "Tender_id": codigo_externo,
-                            "Producto de mi Catálogo": producto_de_mi_catalogo_coincidente,
-                            "Nombre_Producto Licitación": nombre_producto_licitacion,
-                            "Descripcion": descripcion_item_licitacion,
-                            "Quantity": cantidad_licitacion,
-                            "Fecha Cierre": fecha_cierre_display,
-                            "Vencimiento": dias_para_cierre,
-                            "Nombre Licitación General": detalle_lic.get("Nombre", "Sin Nombre General"),
-                        }
-                        st.session_state.oportunidades_encontradas.append(oportunidad)
-        
-        progress_bar_placeholder.empty()
-        log_message(f"Procesamiento de detalles completado. {len(st.session_state.oportunidades_encontradas)} oportunidades encontradas.")
-    else:
-        log_message("No se encontraron licitaciones activas de CENABAST para procesar hoy.")
-    log_message("Fin de la búsqueda.")
-
-if st.button("Buscar Nuevas Oportunidades Ahora", type="primary", use_container_width=True):
-    with st.spinner("Iniciando búsqueda en MercadoPúblico..."): # Mensaje de spinner ajustado
-        run_neshama_logic()
-
-if st.session_state.busqueda_realizada:
-    if st.session_state.oportunidades_encontradas:
-        st.header(f"Resultados de la Búsqueda ({len(st.session_state.oportunidades_encontradas)} oportunidades encontradas):")
-        df_oportunidades = pd.DataFrame(st.session_state.oportunidades_encontradas)
-        
-        column_order_internal = [
-            "Tender_id", "Nombre_Producto Licitación", "Descripcion", 
-            "Fecha Cierre", "Quantity", "Vencimiento",
-            "Producto de mi Catálogo", "Nombre Licitación General" 
-        ]
-        
-        df_display_intermediate = pd.DataFrame()
-        for col in column_order_internal:
-            if col in df_oportunidades.columns:
-                df_display_intermediate[col] = df_oportunidades[col]
-            else:
-                df_display_intermediate[col] = "N/D"
-        
-        df_display_intermediate = df_display_intermediate.rename(columns={
-            "Nombre_Producto Licitación": "Nombre_Producto"
-        })
-        
-        final_column_order_display = [
-            "Tender_id", "Nombre_Producto", "Descripcion", 
-            "Fecha Cierre", "Quantity", "Vencimiento"
-        ]
-        df_display_final = df_display_intermediate[[col for col in final_column_order_display if col in df_display_intermediate.columns]]
-
-        st.dataframe(df_display_final, height=600, use_container_width=True)
-
-        @st.cache_data
-        def convert_df_to_csv(df_to_convert):
-            return df_to_convert.to_csv(index=False).encode('utf-8-sig')
-
-        csv = convert_df_to_csv(df_display_final) 
-        st.download_button(
-            label="Descargar resultados como CSV",
-            data=csv,
-            file_name='oportunidades_pinnacle.csv', # Nombre de archivo cambiado
-            mime='text/csv',
-        )
-    elif st.session_state.log_messages: 
-        st.info("No se encontraron oportunidades que coincidan con tu catálogo de productos en esta búsqueda, o hubo problemas al obtener detalles. Revisa el log.")
+if oportunidades_a_mostrar:
+    st.header(f"Resultados de la Búsqueda ({len(oportunidades_a_mostrar)} oportunidades encontradas):")
     
-with st.expander("Ver registro de actividad (Log)", expanded=False):
-    if st.session_state.log_messages:
-        log_text = "\n".join(reversed(st.session_state.log_messages))
-        st.text_area("Registro:", value=log_text, height=300, disabled=True, key="log_area_pinnacle")
+    # Crear DataFrame a partir de los datos cargados
+    df_oportunidades = pd.DataFrame(oportunidades_a_mostrar)
+    
+    # Columnas esperadas en el JSON del Gist (basado en lo que `updater.py` guarda)
+    # y cómo se renombrarán para la visualización
+    columnas_originales_esperadas = [
+        "Tender_id",
+        "Nombre_Producto Licitación", 
+        "Descripcion", 
+        "Fecha Cierre",
+        "Quantity", 
+        "Vencimiento",
+        "Producto de mi Catálogo", 
+        "Nombre Licitación General" 
+    ]
+    
+    # Crear el DataFrame intermedio asegurando que todas las columnas esperadas existan
+    df_display_intermediate = pd.DataFrame()
+    for col in columnas_originales_esperadas:
+        if col in df_oportunidades.columns:
+            df_display_intermediate[col] = df_oportunidades[col]
+        else:
+            # Si una columna esperada no está en el JSON del Gist, llenar con N/D
+            # Esto podría pasar si cambias la estructura en updater.py y no en la app
+            log_message(f"Columna '{col}' no encontrada en los datos del Gist. Se mostrará N/D.", "ADVERTENCIA")
+            df_display_intermediate[col] = "N/D" 
+    
+    # Renombrar para la visualización
+    df_display_intermediate = df_display_intermediate.rename(columns={
+        "Nombre_Producto Licitación": "Nombre_Producto" 
+    })
+    
+    # Seleccionar y ordenar las columnas finales para mostrar en la UI
+    final_column_order_display = [
+        "Tender_id", "Nombre_Producto", "Descripcion", 
+        "Fecha Cierre", "Quantity", "Vencimiento"
+    ]
+    # Asegurar que solo se muestren estas columnas si existen después del renombrado
+    df_display_final = df_display_intermediate[[col for col in final_column_order_display if col in df_display_intermediate.columns]]
+
+    st.dataframe(df_display_final, height=600, use_container_width=True)
+
+    @st.cache_data
+    def convert_df_to_csv(df_to_convert):
+        return df_to_convert.to_csv(index=False).encode('utf-8-sig')
+
+    csv = convert_df_to_csv(df_display_final) 
+    st.download_button(
+        label="Descargar resultados como CSV",
+        data=csv,
+        file_name='oportunidades_pinnacle.csv',
+        mime='text/csv',
+    )
+else: # Si oportunidades_a_mostrar está vacía
+    st.info("No hay oportunidades para mostrar en este momento. El caché podría estar vacío o hubo un error al cargarlo. Revisa el log.")
+
+# Expansor para el log
+with st.expander("Ver registro de actividad de esta sesión (App Streamlit)", expanded=False):
+    if st.session_state.log_messages_streamlit:
+        log_text = "\n".join(reversed(st.session_state.log_messages_streamlit))
+        st.text_area("Registro:", value=log_text, height=300, disabled=True, key="log_area_streamlit_app")
     else:
-        st.caption("El registro de actividad está vacío.")
+        st.caption("El registro de actividad de esta sesión está vacío.")
