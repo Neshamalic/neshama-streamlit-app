@@ -1,25 +1,25 @@
 import streamlit as st
 import requests
 import json
-from datetime import datetime, date # Se usa 'date' para comparar fechas del caché
+from datetime import datetime, date
 import pandas as pd
-import time # Aunque no se usa activamente para retrasos aquí, es bueno tenerlo si se necesita
+import time
+import os # No se usa directamente, pero a veces es útil para paths
 
 # --- CONFIGURACIÓN ---
-# El API_TICKET ya no es usado directamente por esta app para las búsquedas principales,
-# pero se mantiene por si el bloque try-except original lo necesita como fallback o para otras funciones futuras.
+# El API_TICKET no es esencial para la lógica principal de esta app ahora,
+# pero se mantiene por si el bloque try-except o futuras funciones lo usan.
 try:
     API_TICKET = st.secrets["API_TICKET_MERCADOPUBLICO"]
 except KeyError:
     API_TICKET = "TU_TICKET_POR_DEFECTO_O_DE_PRUEBA_LOCAL" 
     if API_TICKET == "TU_TICKET_POR_DEFECTO_O_DE_PRUEBA_LOCAL":
-        # Ya no es un error crítico si no lo encuentra, porque leemos del Gist
-        st.sidebar.warning("API_TICKET no configurado en los secrets. Se leerá del caché Gist.")
+        st.sidebar.warning("API_TICKET no configurado en secrets. Se leerá del caché Gist.")
 
 # --- URL DEL GIST DE CACHÉ ---
 GIST_CACHE_URL = "https://gist.githubusercontent.com/Neshamalic/7683372d7c8374cbd8bc67d81eec5fe9/raw/7705bf1ca22a60fb3e8683f7394cf1c756cde759/oportunidades_cache.json"
 
-# --- TU CATÁLOGO DE PRODUCTOS (se mantiene por si la app hace algún filtrado local) ---
+# --- TU CATÁLOGO DE PRODUCTOS (se mantiene por si la app hace algún filtrado local futuro) ---
 CATALOGO_PRODUCTOS_RAW = """
 AMLODIPINO	amlodipino
 AMOXICILINA	amoxi
@@ -65,10 +65,7 @@ TRANEXAMICO	TRANEXAMICO,tranexamico
 TRAZODONA	TRAZODONA,trazodona
 """
 
-# No necesitamos parsear el catálogo aquí si el filtrado ya se hizo en updater.py
-# Pero lo dejamos por si en el futuro se quiere añadir filtrado en la UI
 def parsear_catalogo(raw_data):
-    # ... (código de parsear_catalogo como lo tenías)
     catalogo_procesado = {}
     for line in raw_data.strip().splitlines():
         line = line.strip();
@@ -84,26 +81,23 @@ def parsear_catalogo(raw_data):
         catalogo_procesado[producto_principal_original_casing] = palabras_clave_para_este_producto
     return catalogo_procesado
 
-MI_CATALOGO_ESTRUCTURADO = parsear_catalogo(CATALOGO_PRODUCTOS_RAW) # Se mantiene por si acaso
-
+MI_CATALOGO_ESTRUCTURADO = parsear_catalogo(CATALOGO_PRODUCTOS_RAW)
 
 def log_message(message, level="INFO"):
     timestamp = datetime.now().strftime('%H:%M:%S')
-    if 'log_messages_streamlit' not in st.session_state: # Usar un nombre diferente para el log de esta app
+    if 'log_messages_streamlit' not in st.session_state:
         st.session_state.log_messages_streamlit = []
     st.session_state.log_messages_streamlit.append(f"{timestamp} - {level.upper()}: {message}")
-    print(f"STREAMLIT_APP_LOG - {timestamp} - {level.upper()}: {message}") # Para logs del servidor de Streamlit Cloud
+    print(f"STREAMLIT_APP_LOG - {timestamp} - {level.upper()}: {message}")
 
-
-@st.cache_data(ttl=300) # Cachear los datos del Gist por 5 minutos (300 segundos) para reducir llamadas
+@st.cache_data(ttl=300) # Cachear los datos del Gist por 5 minutos
 def cargar_datos_desde_gist():
     log_message(f"Intentando cargar datos desde Gist: {GIST_CACHE_URL}", "INFO")
     oportunidades = []
     fecha_cache_obtenida = "No disponible"
     try:
-        # Añadir un timestamp al final de la URL para intentar evitar el caché del navegador/CDN agresivo
         cache_buster_url = f"{GIST_CACHE_URL}?v={int(time.time())}"
-        response = requests.get(cache_buster_url, timeout=20) # Timeout más corto, es solo leer un archivo
+        response = requests.get(cache_buster_url, timeout=20)
         response.raise_for_status()
         datos_gist = response.json()
         
@@ -115,14 +109,10 @@ def cargar_datos_desde_gist():
         else:
             log_message(f"Gist cargado pero no contiene oportunidades. Fecha del caché Gist: {fecha_cache_obtenida}.", "ADVERTENCIA")
             
-    except requests.exceptions.Timeout:
-        log_message("Timeout al cargar datos desde Gist.", "ERROR")
-    except requests.exceptions.RequestException as e:
-        log_message(f"Error de red al cargar datos desde Gist: {e}", "ERROR")
-    except json.JSONDecodeError as e:
-        log_message(f"Error al decodificar JSON desde Gist: {e}. Contenido recibido: {response.text[:500] if 'response' in locals() else 'N/A'}", "ERROR")
-    except Exception as e:
-        log_message(f"Error inesperado al cargar datos desde Gist: {e}", "ERROR")
+    except requests.exceptions.Timeout: log_message("Timeout al cargar datos desde Gist.", "ERROR")
+    except requests.exceptions.RequestException as e: log_message(f"Error de red al cargar datos desde Gist: {e}", "ERROR")
+    except json.JSONDecodeError as e: log_message(f"Error al decodificar JSON desde Gist: {e}. Contenido: {response.text[:200] if 'response' in locals() else 'N/A'}", "ERROR")
+    except Exception as e: log_message(f"Error inesperado al cargar datos desde Gist: {e}", "ERROR")
     
     return oportunidades, fecha_cache_obtenida
 
@@ -131,17 +121,13 @@ st.set_page_config(page_title="PINNACLE - Licitaciones", page_icon=":briefcase:"
 st.title("PINNACLE :briefcase: - Oportunidades en Licitaciones CENABAST")
 st.markdown("Resultados de licitaciones de CENABAST (actualizados diariamente por un proceso automático).")
 
-# Inicializar session_state para los logs de esta app
 if 'log_messages_streamlit' not in st.session_state:
     st.session_state.log_messages_streamlit = []
 
-# Botón para refrescar la vista (vuelve a cargar del Gist)
 if st.button("Refrescar Vista (desde caché diario)", type="primary"):
-    # Limpiar el caché de la función para forzar una nueva descarga del Gist
     cargar_datos_desde_gist.clear() 
     st.rerun()
 
-# Cargar los datos
 oportunidades_a_mostrar, fecha_del_cache = cargar_datos_desde_gist()
 
 st.caption(f"Datos mostrados corresponden a la actualización automática del: {fecha_del_cache}")
@@ -149,66 +135,122 @@ st.caption(f"Datos mostrados corresponden a la actualización automática del: {
 if oportunidades_a_mostrar:
     st.header(f"Resultados de la Búsqueda ({len(oportunidades_a_mostrar)} oportunidades encontradas):")
     
-    # Crear DataFrame a partir de los datos cargados
     df_oportunidades = pd.DataFrame(oportunidades_a_mostrar)
     
-    # Columnas esperadas en el JSON del Gist (basado en lo que `updater.py` guarda)
-    # y cómo se renombrarán para la visualización
-    columnas_originales_esperadas = [
-        "Tender_id",
-        "Nombre_Producto Licitación", 
-        "Descripcion", 
-        "Fecha Cierre",
-        "Quantity", 
-        "Vencimiento",
-        "Producto de mi Catálogo", 
-        "Nombre Licitación General" 
+    # Columnas que esperamos que vengan del Gist (basado en lo que `updater.py` guarda)
+    columnas_del_gist = [
+        "Tender_id", "Nombre_Producto Licitación", "Descripcion", 
+        "Fecha Cierre", "Quantity", "Vencimiento",
+        "Producto de mi Catálogo", "Nombre Licitación General" 
     ]
     
-    # Crear el DataFrame intermedio asegurando que todas las columnas esperadas existan
-    df_display_intermediate = pd.DataFrame()
-    for col in columnas_originales_esperadas:
+    # Crear un DataFrame intermedio, asegurando que todas las columnas esperadas existan
+    df_para_procesar = pd.DataFrame()
+    for col in columnas_del_gist:
         if col in df_oportunidades.columns:
-            df_display_intermediate[col] = df_oportunidades[col]
+            df_para_procesar[col] = df_oportunidades[col]
         else:
-            # Si una columna esperada no está en el JSON del Gist, llenar con N/D
-            # Esto podría pasar si cambias la estructura en updater.py y no en la app
-            log_message(f"Columna '{col}' no encontrada en los datos del Gist. Se mostrará N/D.", "ADVERTENCIA")
-            df_display_intermediate[col] = "N/D" 
+            log_message(f"Columna '{col}' no encontrada en los datos del Gist. Se usará N/D.", "ADVERTENCIA")
+            df_para_procesar[col] = "N/D"
     
-    # Renombrar para la visualización
-    df_display_intermediate = df_display_intermediate.rename(columns={
-        "Nombre_Producto Licitación": "Nombre_Producto" 
+    # Crear la columna con la URL completa para cada Tender_id para el link
+    if 'Tender_id' in df_para_procesar.columns:
+        df_para_procesar['URL_Licitacion_Completa'] = "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion=" + df_para_procesar['Tender_id'].astype(str)
+    else:
+        df_para_procesar['URL_Licitacion_Completa'] = ""
+
+    # Formatear la columna Tender_id para que sea un link Markdown
+    def format_tender_id_as_link(row):
+        tender_id = row['Tender_id']
+        url = row['URL_Licitacion_Completa']
+        if pd.isna(tender_id) or tender_id == "N/D" or pd.isna(url) or url == "":
+            return tender_id # Devolver solo el ID si no hay URL o ID válido
+        return f"[{tender_id}]({url})"
+
+    if 'Tender_id' in df_para_procesar.columns and 'URL_Licitacion_Completa' in df_para_procesar.columns:
+        df_para_procesar['Tender_id_Link'] = df_para_procesar.apply(format_tender_id_as_link, axis=1)
+    else:
+        df_para_procesar['Tender_id_Link'] = df_para_procesar.get('Tender_id', "N/D")
+
+
+    # Renombrar columnas para la visualización final
+    df_para_mostrar_ui = df_para_procesar.rename(columns={
+        "Nombre_Producto Licitación": "Nombre_Producto",
+        "Tender_id_Link": "ID Licitación (Link)" # Esta será la columna con el link clicable
     })
     
     # Seleccionar y ordenar las columnas finales para mostrar en la UI
     final_column_order_display = [
-        "Tender_id", "Nombre_Producto", "Descripcion", 
-        "Fecha Cierre", "Quantity", "Vencimiento"
+        "ID Licitación (Link)", # La columna con el link
+        "Nombre_Producto", 
+        "Descripcion", 
+        "Fecha Cierre", 
+        "Quantity", 
+        "Vencimiento"
     ]
-    # Asegurar que solo se muestren estas columnas si existen después del renombrado
-    df_display_final = df_display_intermediate[[col for col in final_column_order_display if col in df_display_intermediate.columns]]
+    
+    # Crear el DataFrame final solo con las columnas deseadas para la UI
+    df_display_final = pd.DataFrame()
+    for col in final_column_order_display:
+        if col in df_para_mostrar_ui.columns:
+            df_display_final[col] = df_para_mostrar_ui[col]
+        else:
+            # Esto no debería pasar si definimos 'Tender_id_Link' arriba
+            df_display_final[col] = "N/D (Columna faltante)" 
 
-    st.dataframe(df_display_final, height=600, use_container_width=True)
+    st.dataframe(
+        df_display_final,
+        height=600,
+        use_container_width=True,
+        column_config={
+            "ID Licitación (Link)": st.column_config.MarkdownColumn( # Indicar que esta columna es Markdown
+                "ID Licitación (Ver)", # Etiqueta de la columna
+                help="Haz clic en el ID para ir a MercadoPúblico"
+            ),
+            "Nombre_Producto": st.column_config.TextColumn("Producto"),
+            # Puedes añadir más configuraciones de columna si lo deseas
+        },
+        hide_index=True
+    )
 
+    # Para el CSV, es mejor tener el Tender_id original y la URL completa por separado
     @st.cache_data
     def convert_df_to_csv(df_to_convert):
-        return df_to_convert.to_csv(index=False).encode('utf-8-sig')
+        # Seleccionar columnas relevantes para el CSV, incluyendo el Tender_id original y la URL
+        df_csv = df_to_convert.rename(columns={"ID Licitación (Link)": "ID_con_Formato_Link"}) # Renombrar para evitar confusión
+        
+        # Asegurar que Tender_id (original) y URL_Licitacion_Completa estén para el CSV
+        # Estas columnas vienen de df_para_procesar
+        df_for_csv_export = pd.DataFrame()
+        if 'Tender_id' in df_para_procesar.columns:
+             df_for_csv_export['Tender_id'] = df_para_procesar['Tender_id']
+        if 'URL_Licitacion_Completa' in df_para_procesar.columns:
+            df_for_csv_export['URL_Licitacion'] = df_para_procesar['URL_Licitacion_Completa']
 
-    csv = convert_df_to_csv(df_display_final) 
+        # Añadir el resto de las columnas que se muestran en la UI (excepto el link formateado)
+        for col in ["Nombre_Producto", "Descripcion", "Fecha Cierre", "Quantity", "Vencimiento"]:
+            if col in df_display_final.columns: # df_display_final ya tiene Nombre_Producto renombrado
+                df_for_csv_export[col] = df_display_final[col]
+            elif col in df_para_procesar.columns: # Fallback a df_para_procesar si alguna no está en df_display_final
+                 df_for_csv_export[col] = df_para_procesar[col]
+            else:
+                df_for_csv_export[col] = "N/D"
+        
+        return df_for_csv_export.to_csv(index=False).encode('utf-8-sig')
+
+    csv = convert_df_to_csv(df_display_final) # Pasamos el df que se muestra, pero la función selecciona las columnas adecuadas
     st.download_button(
         label="Descargar resultados como CSV",
         data=csv,
         file_name='oportunidades_pinnacle.csv',
         mime='text/csv',
     )
-else: # Si oportunidades_a_mostrar está vacía
+else:
     st.info("No hay oportunidades para mostrar en este momento. El caché podría estar vacío o hubo un error al cargarlo. Revisa el log.")
 
-# Expansor para el log
 with st.expander("Ver registro de actividad de esta sesión (App Streamlit)", expanded=False):
-    if st.session_state.log_messages_streamlit:
+    if 'log_messages_streamlit' in st.session_state and st.session_state.log_messages_streamlit:
         log_text = "\n".join(reversed(st.session_state.log_messages_streamlit))
-        st.text_area("Registro:", value=log_text, height=300, disabled=True, key="log_area_streamlit_app")
+        st.text_area("Registro:", value=log_text, height=300, disabled=True, key="log_area_streamlit_pinnacle_gist")
     else:
         st.caption("El registro de actividad de esta sesión está vacío.")
