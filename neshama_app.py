@@ -16,7 +16,7 @@ except KeyError:
         pass
 
 # --- URL DEL GIST DE CACHÉ ---
-GIST_CACHE_URL = "https://gist.githubusercontent.com/Neshamalic/7683372d7c8374cbd8bc67d81eec5fe9/raw/7705bf1ca22a60fb3e8683f7394cf1c756cde759/oportunidades_cache.json" # Asegúrate que esta sea tu URL Raw correcta
+GIST_CACHE_URL =  "https://gist.githubusercontent.com/Neshamalic/7683372d7c8374cbd8bc67d81eec5fe9/raw/oportunidades_cache.json" # Asegúrate que esta sea tu URL Raw correcta
 
 # --- TU CATÁLOGO DE PRODUCTOS (se mantiene por si la app hace algún filtrado local futuro) ---
 CATALOGO_PRODUCTOS_RAW = """
